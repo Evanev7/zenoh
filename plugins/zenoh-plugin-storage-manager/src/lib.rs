@@ -53,6 +53,7 @@ mod replication;
 mod storages_mgt;
 use storages_mgt::*;
 use zenoh_util::ffi::JsonKeyValueMap;
+pub use memory_backend::read_raw_memory_storage;
 
 const WORKER_THREAD_NUM: usize = 2;
 const MAX_BLOCK_THREAD_NUM: usize = 50;

@@ -11,7 +11,7 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::{Arc, LazyLock}};
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
@@ -29,6 +29,12 @@ use zenoh_plugin_trait::{plugin_long_version, plugin_version, Plugin};
 use zenoh_util::ffi::JsonValue;
 
 use crate::MEMORY_BACKEND_NAME;
+
+static RAW_ACCESSOR: LazyLock<Arc<RwLock<HashMap<Option<OwnedKeyExpr>, StoredData>>>> = LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
+
+pub async fn read_raw_memory_storage() -> HashMap<Option<OwnedKeyExpr>, StoredData> {
+    RAW_ACCESSOR.read().await.clone()
+}
 
 pub struct MemoryBackend {
     config: VolumeConfig,
@@ -84,7 +90,7 @@ impl MemoryStorage {
     async fn new(properties: StorageConfig) -> ZResult<MemoryStorage> {
         Ok(MemoryStorage {
             config: properties,
-            map: Arc::new(RwLock::new(HashMap::new())),
+            map: Arc::clone(&RAW_ACCESSOR),
         })
     }
 }
