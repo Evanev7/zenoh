@@ -782,6 +782,7 @@ validated_struct::validator! {
                     listen_private_key: Option<String>,
                     listen_certificate: Option<String>,
                     enable_mtls: Option<bool>,
+                    enable_raw_mode_mtls: Option<bool>,
                     connect_private_key: Option<String>,
                     connect_certificate: Option<String>,
                     verify_name_on_connect: Option<bool>,

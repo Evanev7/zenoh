@@ -1,16 +1,23 @@
 use alloc::vec::Vec;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rustls::{
     client::{
         danger::{ServerCertVerified, ServerCertVerifier},
         verify_server_cert_signed_by_trust_anchor,
     },
-    crypto::{verify_tls12_signature, verify_tls13_signature},
-    pki_types::{CertificateDer, ServerName, UnixTime},
+    crypto::{
+        verify_tls12_signature, verify_tls13_signature, verify_tls13_signature_with_raw_key,
+        CryptoProvider,
+    },
+    pki_types::{CertificateDer, ServerName, SubjectPublicKeyInfoDer, UnixTime},
     server::ParsedCertificate,
     RootCertStore,
 };
 use webpki::ALL_VERIFICATION_ALGS;
+use x509_parser::{asn1_rs::FromDer, x509::SubjectPublicKeyInfo};
+use zenoh_core::bail;
+use zenoh_result::ZResult;
 
 pub mod config {
     pub const TLS_ROOT_CA_CERTIFICATE_FILE: &str = "root_ca_certificate_file";
@@ -35,6 +42,8 @@ pub mod config {
 
     pub const TLS_ENABLE_MTLS: &str = "enable_mtls";
     pub const TLS_ENABLE_MTLS_DEFAULT: bool = false;
+    pub const TLS_ENABLE_RAW_MODE_MTLS: &str = "enable_raw_mode_mtls";
+    pub const TLS_ENABLE_RAW_MODE_MTLS_DEFAULT: bool = false;
 
     pub const TLS_VERIFY_NAME_ON_CONNECT: &str = "verify_name_on_connect";
     pub const TLS_VERIFY_NAME_ON_CONNECT_DEFAULT: bool = true;
@@ -240,5 +249,106 @@ pub mod expiration {
             let sleep_duration = tokio::time::Duration::min(MAX_SLEEP_DURATION, wakeup_duration);
             tokio::time::sleep(sleep_duration).await;
         }
+    }
+}
+
+pub fn get_pk_from_certs(der: &[CertificateDer<'_>]) -> ZResult<String> {
+    match der {
+        [key] => {
+            let (_, spki) = SubjectPublicKeyInfo::from_der(key.as_ref())?;
+            let key_bytes = spki.subject_public_key.data.as_ref();
+            return Ok(URL_SAFE_NO_PAD.encode(key_bytes));
+        }
+        _ => bail!("expected exactly one raw public key"),
+    }
+}
+
+#[derive(Debug)]
+pub struct RawCertVerifier {
+    pub provider: CryptoProvider,
+}
+impl rustls::server::danger::ClientCertVerifier for RawCertVerifier {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        Ok(rustls::server::danger::ClientCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOffered,
+        ))
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        if dss.scheme != rustls::SignatureScheme::ED25519 {
+            return Err(rustls::Error::PeerMisbehaved(
+                rustls::PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,
+            ));
+        }
+        verify_tls13_signature_with_raw_key(
+            message,
+            &SubjectPublicKeyInfoDer::from(cert.as_ref()),
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![rustls::SignatureScheme::ED25519]
+    }
+    fn requires_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+impl rustls::client::danger::ServerCertVerifier for RawCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        <Self as rustls::server::danger::ClientCertVerifier>::verify_tls12_signature(
+            &self, message, cert, dss,
+        )
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        <Self as rustls::server::danger::ClientCertVerifier>::verify_tls13_signature(
+            &self, message, cert, dss,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        <Self as rustls::server::danger::ClientCertVerifier>::supported_verify_schemes(&self)
+    }
+    fn requires_raw_public_keys(&self) -> bool {
+        <Self as rustls::server::danger::ClientCertVerifier>::requires_raw_public_keys(&self)
     }
 }

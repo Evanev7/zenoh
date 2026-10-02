@@ -252,23 +252,32 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
             dst_addr,
             tls_close_link_on_expiration,
             is_mixed_rel,
+            raw_mode,
         } = QuicClientBuilder::new(&endpoint).await?;
 
-        let auth_id = get_cert_common_name(&quic_conn)?;
-        let certchain_expiration_time =
-            get_cert_chain_expiration(&quic_conn)?.expect("server should have certificate chain");
+        let auth_id = get_cert_common_name(&quic_conn, raw_mode)?;
+        let certchain_expiration_time = if tls_close_link_on_expiration {
+            Some(
+                get_cert_chain_expiration(&quic_conn)?
+                    .expect("server should have certificate chain"),
+            )
+        } else {
+            None
+        };
 
         let link = Arc::<LinkUnicastQuic>::new_cyclic(|weak_link| {
             let mut expiration_manager = None;
             if tls_close_link_on_expiration {
                 // setup expiration manager
-                expiration_manager = Some(LinkCertExpirationManager::new(
-                    weak_link.clone(),
-                    src_addr,
-                    dst_addr,
-                    QUIC_LOCATOR_PREFIX,
-                    certchain_expiration_time,
-                ))
+                expiration_manager = certchain_expiration_time.map(|it| {
+                    LinkCertExpirationManager::new(
+                        weak_link.clone(),
+                        src_addr,
+                        dst_addr,
+                        QUIC_LOCATOR_PREFIX,
+                        it,
+                    )
+                })
             }
             LinkUnicastQuic::new(
                 quic_conn.clone(),
@@ -359,16 +368,17 @@ fn acceptor_callback(link_material: QuicLinkMaterial) -> ZResult<LinkUnicast> {
         streams,
         is_mixed_rel,
         tls_close_link_on_expiration,
+        raw_mode,
     } = link_material;
     let streams = streams.expect("Streams should be initialized");
 
     let dst_locator = Locator::new(QUIC_LOCATOR_PREFIX, dst_addr.to_string(), "")?;
     // Get Quic auth identifier
-    let auth_id = get_cert_common_name(&quic_conn)?;
+    let auth_id = get_cert_common_name(&quic_conn, raw_mode)?;
 
     // Get certificate chain expiration
     let mut maybe_expiration_time = None;
-    if tls_close_link_on_expiration {
+    if !raw_mode && tls_close_link_on_expiration {
         match get_cert_chain_expiration(&quic_conn)? {
             exp @ Some(_) => maybe_expiration_time = exp,
             None => tracing::warn!(

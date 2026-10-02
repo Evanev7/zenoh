@@ -22,12 +22,13 @@ use std::{
 };
 
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer, TrustAnchor},
-    server::WebPkiClientVerifier,
+    client::AlwaysResolvesClientRawPublicKeys,
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, TrustAnchor},
+    server::{AlwaysResolvesServerRawPublicKeys, WebPkiClientVerifier},
+    sign::CertifiedKey,
     version::TLS13,
-    ClientConfig, RootCertStore, ServerConfig,
+    ClientConfig, RootCertStore, ServerConfig, SignatureScheme,
 };
-use rustls_pki_types::ServerName;
 use secrecy::ExposeSecret;
 use webpki::anchor_from_trusted_cert;
 use zenoh_config::Config as ZenohConfig;
@@ -36,7 +37,7 @@ use zenoh_link_commons::{
     tcp::TcpSocketConfig,
     tls::{
         config::{self, *},
-        WebPkiVerifierAnyServerName,
+        RawCertVerifier, WebPkiVerifierAnyServerName,
     },
     ConfigurationInspector, BIND_INTERFACE, BIND_SOCKET, TCP_SO_RCV_BUF, TCP_SO_SND_BUF,
 };
@@ -101,6 +102,14 @@ impl ConfigurationInspector<ZenohConfig> for TlsConfigurator {
                 ));
             }
             _ => {}
+        }
+
+        match c
+            .enable_raw_mode_mtls()
+            .unwrap_or(TLS_ENABLE_RAW_MODE_MTLS_DEFAULT)
+        {
+            true => ps.push((TLS_ENABLE_RAW_MODE_MTLS, "true")),
+            false => ps.push((TLS_ENABLE_RAW_MODE_MTLS, "false")),
         }
 
         match c.enable_mtls().unwrap_or(TLS_ENABLE_MTLS_DEFAULT) {
@@ -177,29 +186,40 @@ pub(crate) struct TlsServerConfig<'a> {
     pub(crate) tls_handshake_timeout: Duration,
     pub(crate) tls_close_link_on_expiration: bool,
     pub(crate) tcp_socket_config: TcpSocketConfig<'a>,
+    pub(crate) raw_mode: bool,
 }
 
 impl<'a> TlsServerConfig<'a> {
     pub async fn new(config: &'a Config<'_>) -> ZResult<Self> {
-        let tls_server_client_auth: bool = match config.get(TLS_ENABLE_MTLS) {
+        let raw_mode: bool = match config.get(TLS_ENABLE_RAW_MODE_MTLS) {
             Some(s) => s
                 .parse()
-                .map_err(|_| zerror!("Unknown enable mTLS argument: {}", s))?,
-            None => TLS_ENABLE_MTLS_DEFAULT,
+                .map_err(|_| zerror!("Unknown enable mTLS raw mode argument: {}", s))?,
+            None => TLS_ENABLE_RAW_MODE_MTLS_DEFAULT,
         };
+        let tls_server_client_auth: bool = raw_mode
+            || match config.get(TLS_ENABLE_MTLS) {
+                Some(s) => s
+                    .parse()
+                    .map_err(|_| zerror!("Unknown enable mTLS argument: {}", s))?,
+                None => TLS_ENABLE_MTLS_DEFAULT,
+            };
         let tls_close_link_on_expiration: bool = match config.get(TLS_CLOSE_LINK_ON_EXPIRATION) {
             Some(s) => s
                 .parse()
                 .map_err(|_| zerror!("Unknown close on expiration argument: {}", s))?,
             None => TLS_CLOSE_LINK_ON_EXPIRATION_DEFAULT,
-        };
-        let tls_server_private_key = TlsServerConfig::load_tls_private_key(config).await?;
-        let tls_server_certificate = TlsServerConfig::load_tls_certificate(config).await?;
+        } && !raw_mode;
 
-        let certs: Vec<CertificateDer> =
+        let tls_server_private_key = TlsServerConfig::load_tls_private_key(config).await?;
+        let certs: Vec<CertificateDer> = if !raw_mode {
+            let tls_server_certificate = TlsServerConfig::load_tls_certificate(config).await?;
             rustls_pemfile::certs(&mut Cursor::new(&tls_server_certificate))
                 .collect::<Result<_, _>>()
-                .map_err(|err| zerror!("Error processing server certificate: {err}."))?;
+                .map_err(|err| zerror!("Error processing server certificate: {err}."))?
+        } else {
+            vec![]
+        };
 
         let mut keys: Vec<PrivateKeyDer> =
             rustls_pemfile::rsa_private_keys(&mut Cursor::new(&tls_server_private_key))
@@ -235,7 +255,28 @@ impl<'a> TlsServerConfig<'a> {
             // when there are multiple quic links, and all but the first execution will fail.
             .ok();
 
-        let sc = if tls_server_client_auth {
+        let sc = if raw_mode {
+            let provider = rustls::crypto::ring::default_provider();
+            let signing_key = provider.key_provider.load_private_key(keys.remove(0))?;
+            if signing_key
+                .choose_scheme(&[SignatureScheme::ED25519])
+                .is_none()
+            {
+                bail!("enable_raw_mode_mtls requires an Ed25519 private key");
+            }
+            let spki_bytes = signing_key
+                .public_key()
+                .expect("signing key must contain public key")
+                .as_ref()
+                .to_vec();
+            let server_key = Arc::new(CertifiedKey::new(
+                vec![CertificateDer::from(spki_bytes)],
+                signing_key,
+            ));
+            ServerConfig::builder_with_protocol_versions(&[&TLS13])
+                .with_client_cert_verifier(Arc::new(RawCertVerifier { provider }))
+                .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(server_key)))
+        } else if tls_server_client_auth {
             let root_cert_store = load_trust_anchors(config)?.map_or_else(
                 || Err(zerror!("Missing root certificates while mTLS is enabled.")),
                 Ok,
@@ -290,6 +331,7 @@ impl<'a> TlsServerConfig<'a> {
                 bind_socket,
                 parse_dscp(config)?,
             ),
+            raw_mode,
         })
     }
 
@@ -318,16 +360,23 @@ pub(crate) struct TlsClientConfig<'a> {
     pub(crate) client_config: ClientConfig,
     pub(crate) tls_close_link_on_expiration: bool,
     pub(crate) tcp_socket_config: TcpSocketConfig<'a>,
+    pub(crate) raw_mode: bool,
 }
 
 impl<'a> TlsClientConfig<'a> {
     pub async fn new(config: &'a Config<'_>) -> ZResult<Self> {
+        let raw_mode: bool = match config.get(TLS_ENABLE_RAW_MODE_MTLS) {
+            Some(s) => s
+                .parse()
+                .map_err(|_| zerror!("Unknown enable mTLS raw mode argument: {}", s))?,
+            None => TLS_ENABLE_RAW_MODE_MTLS_DEFAULT,
+        };
         let tls_client_server_auth: bool = match config.get(TLS_ENABLE_MTLS) {
             Some(s) => s
                 .parse()
                 .map_err(|_| zerror!("Unknown enable mTLS auth argument: {}", s))?,
             None => TLS_ENABLE_MTLS_DEFAULT,
-        };
+        } || raw_mode;
 
         let tls_server_name_verification: bool = match config.get(TLS_VERIFY_NAME_ON_CONNECT) {
             Some(s) => s
@@ -344,18 +393,19 @@ impl<'a> TlsClientConfig<'a> {
                 .parse()
                 .map_err(|_| zerror!("Unknown close on expiration argument: {}", s))?,
             None => TLS_CLOSE_LINK_ON_EXPIRATION_DEFAULT,
-        };
+        } && !raw_mode;
 
         // Allows mixed user-generated CA and webPKI CA
-        tracing::debug!("Loading default Web PKI certificates.");
-        let mut root_cert_store = RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
+        let mut root_cert_store = RootCertStore::empty();
+        if !raw_mode {
+            tracing::debug!("Loading default Web PKI certificates.");
+            root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_vec());
 
-        if let Some(custom_root_cert) = load_trust_anchors(config)? {
-            tracing::debug!("Loading user-generated certificates.");
-            root_cert_store.extend(custom_root_cert.roots);
-        }
+            if let Some(custom_root_cert) = load_trust_anchors(config)? {
+                tracing::debug!("Loading user-generated certificates.");
+                root_cert_store.extend(custom_root_cert.roots);
+            }
+        };
 
         // Install ring based rustls CryptoProvider.
         rustls::crypto::ring::default_provider()
@@ -370,12 +420,15 @@ impl<'a> TlsClientConfig<'a> {
         let cc = if tls_client_server_auth {
             tracing::debug!("Loading client authentication key and certificate...");
             let tls_client_private_key = TlsClientConfig::load_tls_private_key(config).await?;
-            let tls_client_certificate = TlsClientConfig::load_tls_certificate(config).await?;
+            let certs: Vec<CertificateDer> = if !raw_mode {
+                let tls_client_certificate = TlsClientConfig::load_tls_certificate(config).await?;
 
-            let certs: Vec<CertificateDer> =
                 rustls_pemfile::certs(&mut Cursor::new(&tls_client_certificate))
                     .collect::<Result<_, _>>()
-                    .map_err(|err| zerror!("Error processing client certificate: {err}."))?;
+                    .map_err(|err| zerror!("Error processing client certificate: {err}."))?
+            } else {
+                vec![]
+            };
 
             let mut keys: Vec<PrivateKeyDer> =
                 rustls_pemfile::rsa_private_keys(&mut Cursor::new(&tls_client_private_key))
@@ -404,7 +457,31 @@ impl<'a> TlsClientConfig<'a> {
 
             let builder = ClientConfig::builder_with_protocol_versions(&[&TLS13]);
 
-            if tls_server_name_verification {
+            if raw_mode {
+                let provider = rustls::crypto::ring::default_provider();
+                let signing_key = provider.key_provider.load_private_key(keys.remove(0))?;
+                if signing_key
+                    .choose_scheme(&[SignatureScheme::ED25519])
+                    .is_none()
+                {
+                    bail!("enable_raw_mode_mtls requires an Ed25519 private key");
+                }
+                let spki_bytes = signing_key
+                    .public_key()
+                    .expect("signing key must contain public key")
+                    .as_ref()
+                    .to_vec();
+                let client_key = Arc::new(CertifiedKey::new(
+                    vec![CertificateDer::from(spki_bytes)],
+                    signing_key,
+                ));
+                Ok(builder
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(RawCertVerifier { provider }))
+                    .with_client_cert_resolver(Arc::new(AlwaysResolvesClientRawPublicKeys::new(
+                        client_key,
+                    ))))
+            } else if tls_server_name_verification {
                 builder
                     .with_root_certificates(root_cert_store)
                     .with_client_auth_cert(certs, keys.remove(0))
@@ -462,6 +539,7 @@ impl<'a> TlsClientConfig<'a> {
                 bind_socket,
                 parse_dscp(config)?,
             ),
+            raw_mode,
         })
     }
 

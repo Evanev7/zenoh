@@ -47,6 +47,7 @@ impl LinkUnicastQuicUnsecure {
             dst_addr,
             is_mixed_rel,
             tls_close_link_on_expiration: _,
+            raw_mode: _,
         } = QuicClientBuilder::new(endpoint).security(false).await?;
         let streams = streams.expect("QUIC streams should be initialized");
         let quic_link = Self {
@@ -181,6 +182,7 @@ impl LinkUnicastQuicUnsecure {
             streams,
             is_mixed_rel,
             tls_close_link_on_expiration: _,
+            raw_mode: _,
         } = quic_link_material;
         let quic_link = Self {
             connection: quic_conn.clone(),

@@ -247,25 +247,34 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuicDatagram {
             dst_addr,
             tls_close_link_on_expiration,
             is_mixed_rel: _,
+            raw_mode,
         } = QuicClientBuilder::new(&endpoint).streamed(false).await?;
 
         debug_assert!(streams.is_none(), "Unreliable QUIC should not open streams");
 
-        let auth_id = get_cert_common_name(&quic_conn)?;
-        let certchain_expiration_time =
-            get_cert_chain_expiration(&quic_conn)?.expect("server should have certificate chain");
+        let auth_id = get_cert_common_name(&quic_conn, raw_mode)?;
+        let certchain_expiration_time = if !tls_close_link_on_expiration {
+            Some(
+                get_cert_chain_expiration(&quic_conn)?
+                    .expect("server should have certificate chain"),
+            )
+        } else {
+            None
+        };
 
         let link = Arc::<LinkUnicastQuicDatagram>::new_cyclic(|weak_link| {
             let mut expiration_manager = None;
             if tls_close_link_on_expiration {
                 // setup expiration manager
-                expiration_manager = Some(LinkCertExpirationManager::new(
-                    weak_link.clone(),
-                    src_addr,
-                    dst_addr,
-                    QUIC_DATAGRAM_LOCATOR_PREFIX,
-                    certchain_expiration_time,
-                ))
+                expiration_manager = certchain_expiration_time.map(|it| {
+                    LinkCertExpirationManager::new(
+                        weak_link.clone(),
+                        src_addr,
+                        dst_addr,
+                        QUIC_DATAGRAM_LOCATOR_PREFIX,
+                        it,
+                    )
+                })
             }
             LinkUnicastQuicDatagram::new(
                 quic_conn,
@@ -343,13 +352,14 @@ fn acceptor_callback(link_material: QuicLinkMaterial) -> ZResult<LinkUnicast> {
         streams,
         tls_close_link_on_expiration,
         is_mixed_rel: _,
+        raw_mode,
     } = link_material;
 
     debug_assert!(streams.is_none(), "Unreliable QUIC should not open streams");
 
     let dst_locator = Locator::new(QUIC_DATAGRAM_LOCATOR_PREFIX, dst_addr.to_string(), "")?;
     // Get Quic auth identifier
-    let auth_id = get_cert_common_name(&quic_conn)?;
+    let auth_id = get_cert_common_name(&quic_conn, raw_mode)?;
 
     // Get certificate chain expiration
     let mut maybe_expiration_time = None;

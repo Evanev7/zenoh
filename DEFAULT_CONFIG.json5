@@ -702,6 +702,9 @@
         listen_certificate: null,
         ///  Enables mTLS (mutual authentication), client authentication
         enable_mtls: false,
+        ///  Enables raw mode mTLS, proving only ed25519 key possession.
+        /// incompatible with close_link_on_expiration as raw keys do not expire.
+        enable_raw_mode_mtls: false,
         /// Path to the TLS connecting side private key
         connect_private_key: null,
         /// Path to the TLS connecting side certificate

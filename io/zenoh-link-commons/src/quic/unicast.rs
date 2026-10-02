@@ -422,6 +422,7 @@ impl<F: AcceptorCallback> QuicServer<F> {
                 tls_close_link_on_expiration: server_crypto.tls_close_link_on_expiration,
                 is_streamed,
                 inner: acceptor_params,
+                raw_mode: server_crypto.raw_mode,
             },
             locator,
             local_addr,
@@ -486,6 +487,7 @@ pub struct QuicClient {
     pub dst_addr: SocketAddr,
     pub is_mixed_rel: bool,
     pub tls_close_link_on_expiration: bool,
+    pub raw_mode: bool,
 }
 
 impl fmt::Debug for QuicClient {
@@ -608,6 +610,7 @@ impl QuicClient {
             dst_addr,
             is_mixed_rel,
             tls_close_link_on_expiration: client_crypto.tls_close_link_on_expiration,
+            raw_mode: client_crypto.raw_mode,
         })
     }
 }
@@ -646,6 +649,7 @@ pub struct QuicAcceptor<F: AcceptorCallback> {
     tls_close_link_on_expiration: bool,
     is_streamed: bool,
     inner: QuicAcceptorParams<F>,
+    raw_mode: bool,
 }
 
 impl<F: AcceptorCallback> fmt::Debug for QuicAcceptor<F> {
@@ -757,6 +761,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
             streams,
             is_mixed_rel,
             tls_close_link_on_expiration,
+            raw_mode: self.raw_mode,
         })?;
 
         Ok(link)
@@ -772,6 +777,7 @@ pub struct QuicLinkMaterial {
     pub streams: Option<QuicStreams>,
     pub is_mixed_rel: bool,
     pub tls_close_link_on_expiration: bool,
+    pub raw_mode: bool,
 }
 
 pub struct QuicStreams {

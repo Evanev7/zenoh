@@ -35,7 +35,10 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use zenoh_core::{bail, zasynclock};
 use zenoh_link_commons::{
     get_ip_interface_names,
-    tls::expiration::{LinkCertExpirationManager, LinkWithCertExpiration},
+    tls::{
+        expiration::{LinkCertExpirationManager, LinkWithCertExpiration},
+        get_pk_from_certs,
+    },
     LinkAuthId, LinkManagerUnicastTrait, LinkUnicast, LinkUnicastTrait, ListenersUnicastIP,
     NewLinkChannelSender, BIND_INTERFACE, BIND_SOCKET,
 };
@@ -382,9 +385,15 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
             })?;
 
         let (_, tls_conn) = tls_stream.get_ref();
-        let auth_identifier = get_server_cert_common_name(tls_conn)?;
-        let certchain_expiration_time = get_cert_chain_expiration(&tls_conn.peer_certificates())?
-            .expect("server should have certificate chain");
+        let auth_identifier = get_server_cert_common_name(tls_conn, client_config.raw_mode)?;
+        let certchain_expiration_time = if client_config.tls_close_link_on_expiration {
+            Some(
+                get_cert_chain_expiration(&tls_conn.peer_certificates())?
+                    .expect("server should have certificate chain"),
+            )
+        } else {
+            None
+        };
 
         let tls_stream = TlsStream::Client(tls_stream);
 
@@ -392,13 +401,15 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
             let mut expiration_manager = None;
             if client_config.tls_close_link_on_expiration {
                 // setup expiration manager
-                expiration_manager = Some(LinkCertExpirationManager::new(
-                    weak_link.clone(),
-                    src_addr,
-                    dst_addr,
-                    TLS_LOCATOR_PREFIX,
-                    certchain_expiration_time,
-                ))
+                expiration_manager = certchain_expiration_time.map(|it| {
+                    LinkCertExpirationManager::new(
+                        weak_link.clone(),
+                        src_addr,
+                        dst_addr,
+                        TLS_LOCATOR_PREFIX,
+                        it,
+                    )
+                })
             }
             LinkUnicastTls::new(
                 tls_stream,
@@ -448,6 +459,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
                     manager,
                     tls_server_config.tls_handshake_timeout,
                     tls_server_config.tls_close_link_on_expiration,
+                    tls_server_config.raw_mode,
                 )
                 .await
             }
@@ -500,6 +512,7 @@ async fn accept_task(
     manager: NewLinkChannelSender,
     tls_handshake_timeout: Duration,
     tls_close_link_on_expiration: bool,
+    raw_mode: bool,
 ) -> ZResult<()> {
     let src_addr = socket.local_addr().map_err(|e| {
         let e = zerror!("Can not accept TLS connections: {}", e);
@@ -527,7 +540,7 @@ async fn accept_task(
                                 continue;
                             }
                         };
-                        let auth_identifier = match get_client_cert_common_name(tls_conn) {
+                        let auth_identifier = match get_client_cert_common_name(tls_conn, raw_mode) {
                             Ok(auth_id) => auth_id,
                             Err(e) => {
                                 tracing::warn!("Error getting client cert common name: {e}");
@@ -604,15 +617,21 @@ async fn accept_task(
     Ok(())
 }
 
-fn get_client_cert_common_name(tls_conn: &rustls::CommonState) -> ZResult<TlsAuthId> {
+fn get_client_cert_common_name(
+    tls_conn: &rustls::CommonState,
+    raw_mode: bool,
+) -> ZResult<TlsAuthId> {
     if let Some(client_certs) = tls_conn.peer_certificates() {
+        if raw_mode {
+            let auth_value = Some(get_pk_from_certs(client_certs)?);
+            return Ok(TlsAuthId { auth_value });
+        }
         let (_, cert) = X509Certificate::from_der(client_certs[0].as_ref())?;
         let subject_name = &cert
             .subject
             .iter_common_name()
             .next()
             .and_then(|cn| cn.as_str().ok());
-
         Ok(TlsAuthId {
             auth_value: subject_name.map(|cn| cn.to_string()),
         })
@@ -621,9 +640,16 @@ fn get_client_cert_common_name(tls_conn: &rustls::CommonState) -> ZResult<TlsAut
     }
 }
 
-fn get_server_cert_common_name(tls_conn: &rustls::ClientConnection) -> ZResult<TlsAuthId> {
+fn get_server_cert_common_name(
+    tls_conn: &rustls::ClientConnection,
+    raw_mode: bool,
+) -> ZResult<TlsAuthId> {
     let serv_certs = tls_conn.peer_certificates().unwrap();
     let mut auth_id = TlsAuthId { auth_value: None };
+    if raw_mode {
+        let auth_value = Some(get_pk_from_certs(serv_certs)?);
+        return Ok(TlsAuthId { auth_value });
+    }
 
     // Need the first certificate in the chain so no need for looping
     if let Some(item) = serv_certs.iter().next() {
