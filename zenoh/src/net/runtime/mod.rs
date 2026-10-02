@@ -641,6 +641,8 @@ impl WeakRuntime {
     }
 }
 
+pub type AdmissionCallback = Box<dyn Fn(&TransportPeer) -> ZResult<()> + Send + Sync>;
+
 pub struct RuntimeBuilder {
     config: zenoh_config::ExpandedConfig,
     #[cfg(feature = "plugins")]
@@ -649,6 +651,8 @@ pub struct RuntimeBuilder {
     shm_clients: Option<Arc<ShmClientStorage>>,
     #[cfg(feature = "unstable")]
     timestamp_callback: Option<GetTimestampCallback>,
+    #[cfg(feature = "unstable")]
+    admission_callback: Option<AdmissionCallback>,
     #[cfg(test)]
     subregions: Option<Vec<Region>>,
     #[cfg(test)]
@@ -687,6 +691,8 @@ impl RuntimeBuilder {
             shm_clients: None,
             #[cfg(feature = "unstable")]
             timestamp_callback: None,
+            #[cfg(feature = "unstable")]
+            admission_callback: None,
             #[cfg(test)]
             subregions: None,
             #[cfg(test)]
@@ -709,6 +715,12 @@ impl RuntimeBuilder {
     #[cfg(feature = "unstable")]
     pub fn timestamp_callback(mut self, cb: Option<GetTimestampCallback>) -> Self {
         self.timestamp_callback = cb;
+        self
+    }
+
+    #[cfg(feature = "unstable")]
+    pub fn admission_callback(mut self, cb: Option<AdmissionCallback>) -> Self {
+        self.admission_callback = cb;
         self
     }
 
@@ -735,6 +747,8 @@ impl RuntimeBuilder {
             shm_clients,
             #[cfg(feature = "unstable")]
             timestamp_callback,
+            #[cfg(feature = "unstable")]
+            admission_callback,
             #[cfg(test)]
             subregions,
             #[cfg(test)]
@@ -785,7 +799,12 @@ impl RuntimeBuilder {
             .whatami(whatami)
             .bound_callback({
                 let config = config.clone();
-                move |p| region::compute_transient_bound_of(&p, &config)
+                move |p| {
+                    if let Some(check) = &admission_callback {
+                        check(&p)?;
+                    }
+                    region::compute_transient_bound_of(&p, &config)
+                }
             });
 
         #[cfg(feature = "shared-memory")]
