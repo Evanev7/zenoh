@@ -182,6 +182,7 @@ pub struct AclConfigSubjects {
     pub usernames: Option<NEVec<Username>>,
     pub link_protocols: Option<NEVec<InterceptorLink>>,
     pub zids: Option<NEVec<ZenohId>>,
+    pub region_names: Option<NEVec<RegionName>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

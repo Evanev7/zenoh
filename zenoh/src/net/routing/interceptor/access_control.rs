@@ -734,6 +734,13 @@ impl InterceptorFactoryTrait for AclEnforcer {
         let mut link_protocols = Vec::new();
         let username = auth_ids.username().cloned().map(Username);
         let zid: ZenohId = (*auth_ids.zid()).into();
+        let region_name = match transport.get_peer() {
+            Ok(peer) => peer.region_name,
+            Err(err) => {
+                tracing::error!("Couldn't get Transport Peer: {}", err);
+                return (None, None);
+            }
+        };
 
         for auth_id in auth_ids.link_auth_ids() {
             match auth_id {
@@ -774,12 +781,13 @@ impl InterceptorFactoryTrait for AclEnforcer {
 
         let mut auth_subjects = HashSet::new();
 
-        for ((((username, interface), cert_common_name), link_protocol), zid) in
+        for (((((username, interface), cert_common_name), link_protocol), zid), region_name) in
             iter::once(username)
                 .cartesian_product(interfaces)
                 .cartesian_product(cert_common_names)
                 .cartesian_product(link_protocols)
                 .cartesian_product(iter::once(Some(zid)))
+                .cartesian_product(iter::once(region_name))
         {
             let query = SubjectQuery {
                 interface,
@@ -787,6 +795,7 @@ impl InterceptorFactoryTrait for AclEnforcer {
                 username,
                 link_protocol,
                 zid,
+                region_name,
             };
 
             for entry in self.enforcer.subject_store.query(&query) {

@@ -29,6 +29,7 @@ use zenoh_keyexpr::{
     keyexpr,
     keyexpr_tree::{IKeyExprTree, IKeyExprTreeMut, IKeyExprTreeNode, KeBoxTree},
 };
+use zenoh_protocol::core::RegionName;
 use zenoh_result::ZResult;
 
 use super::InterfaceEnabled;
@@ -43,6 +44,7 @@ pub(crate) struct Subject {
     pub(crate) username: SubjectProperty<Username>,
     pub(crate) link_type: SubjectProperty<InterceptorLink>,
     pub(crate) zid: SubjectProperty<ZenohId>,
+    pub(crate) region_name: SubjectProperty<RegionName>,
 }
 
 impl Subject {
@@ -54,6 +56,7 @@ impl Subject {
                 .matches(query.cert_common_name.as_ref())
             && self.link_type.matches(query.link_protocol.as_ref())
             && self.zid.matches(query.zid.as_ref())
+            && self.region_name.matches(query.region_name.as_ref())
     }
 }
 
@@ -82,6 +85,7 @@ pub(crate) struct SubjectQuery {
     pub(crate) username: Option<Username>,
     pub(crate) link_protocol: Option<InterceptorLink>,
     pub(crate) zid: Option<ZenohId>,
+    pub(crate) region_name: Option<RegionName>,
 }
 
 impl std::fmt::Display for SubjectQuery {
@@ -92,6 +96,7 @@ impl std::fmt::Display for SubjectQuery {
             self.username.as_ref().map(|username| format!("{username}")),
             self.link_protocol.as_ref().map(|link| format!("{link}")),
             self.zid.as_ref().map(|zid| format!("{zid}")),
+            self.region_name.as_ref().map(|rn| rn.as_str().to_owned()),
         ];
         write!(
             f,
@@ -491,6 +496,16 @@ impl PolicyEnforcer {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or(vec![SubjectProperty::Wildcard]);
+            // FIXME: Unnecessary .collect() because of different iterator types
+            let region_names = config_subject
+                .region_names
+                .map(|region_names| {
+                    region_names
+                        .into_iter()
+                        .map(SubjectProperty::Exactly)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or(vec![SubjectProperty::Wildcard]);
 
             // create ACL subject combinations
             let subject_combination_ids = interfaces
@@ -499,14 +514,19 @@ impl PolicyEnforcer {
                 .cartesian_product(usernames)
                 .cartesian_product(link_types)
                 .cartesian_product(zids)
+                .cartesian_product(region_names)
                 .map(
-                    |((((interface, cert_common_name), username), link_type), zid)| {
+                    |(
+                        ((((interface, cert_common_name), username), link_type), zid),
+                        region_name,
+                    )| {
                         let subject = Subject {
                             interface,
                             cert_common_name,
                             username,
                             link_type,
                             zid,
+                            region_name,
                         };
                         subject_map_builder.insert_or_get(subject)
                     },

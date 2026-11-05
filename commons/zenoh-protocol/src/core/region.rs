@@ -204,8 +204,14 @@ impl<'de> Deserialize<'de> for Region {
 /// A region name is a non-empty UTF-8 string limited to [`Self::MAX_LEN`] bytes. It is used to
 /// communicate (north) regions names in establishment as well as to match against said names in
 /// `gateway` configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RegionName(String);
+
+impl Display for RegionName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 impl RegionName {
     pub const MAX_LEN: usize = 32;
