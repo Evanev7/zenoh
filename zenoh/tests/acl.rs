@@ -88,6 +88,13 @@ async fn test_acl_interface_names() {
     test_pub_sub_network_interface().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_acl_region_names() {
+    zenoh::init_log_from_env_or("error");
+
+    test_pub_sub_region_name().await;
+}
+
 async fn get_basic_router_config() -> Config {
     let mut config = Config::default();
     config.set_mode(Some(WhatAmI::Router)).unwrap();
@@ -2112,5 +2119,94 @@ async fn test_pub_sub_network_interface() {
         assert!(*zlock!(deleted));
         ztimeout!(subscriber.undeclare()).unwrap();
     }
+    test_context.close().await;
+}
+
+async fn test_pub_sub_region_name() {
+    println!("test_pub_sub_region_name");
+    let mut test_context = TestSessions::new();
+
+    let mut config_router = get_basic_router_config().await;
+    config_router
+        .insert_json5(
+            "access_control",
+            r#"{
+                    "enabled": true,
+                    "default_permission": "deny",
+                    "rules": [
+                        {
+                            id: "allow pub/sub",
+                            permission: "allow",
+                            messages: ["put", "delete", "declare_subscriber"],
+                            flows: ["ingress", "egress"],
+                            key_exprs: ["**"],
+                        },
+                    ],
+                    "subjects": [
+                        {
+                            id: "main",
+                            region_names: ["main"],
+                        }
+                    ],
+                    "policies": [
+                        {
+                            rules: ["allow pub/sub"],
+                            subjects: ["main"],
+                        }
+                    ],
+                }"#,
+        )
+        .unwrap();
+    println!("Opening router session");
+    let _session = test_context.open_listener_with_cfg(config_router).await;
+
+    let client_config = |test_context: &TestSessions, region_name: Option<&str>| {
+        let mut config = get_basic_client_config(test_context);
+        if let Some(name) = region_name {
+            config
+                .insert_json5("region_name", &format!("\"{name}\""))
+                .unwrap();
+        }
+        config
+    };
+
+    println!("Opening client sessions");
+    let sub_session = test_context
+        .open_connector_with_cfg(client_config(&test_context, Some("main")))
+        .await;
+
+    let received = Arc::new(Mutex::new(Vec::<String>::new()));
+    let received_clone = received.clone();
+    let subscriber = sub_session
+        .declare_subscriber(KEY_EXPR)
+        .callback(move |sample| {
+            if sample.kind() == SampleKind::Put {
+                zlock!(received_clone).push(sample.payload().try_to_string().unwrap().into_owned());
+            }
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(SLEEP).await;
+
+    // only the publisher whose name matches the subject may publish; a different name and no
+    // name both fall through to the default deny
+    for (region_name, value) in [
+        (Some("main"), "from-main"),
+        (Some("other"), "from-other"),
+        (None, "from-unnamed"),
+    ] {
+        let pub_session = test_context
+            .open_connector_with_cfg(client_config(&test_context, region_name))
+            .await;
+        let publisher = pub_session.declare_publisher(KEY_EXPR).await.unwrap();
+        tokio::time::sleep(SLEEP).await;
+        publisher.put(value).await.unwrap();
+        tokio::time::sleep(SLEEP).await;
+        ztimeout!(publisher.undeclare()).unwrap();
+    }
+
+    assert_eq!(*zlock!(received), vec!["from-main".to_owned()]);
+
+    ztimeout!(subscriber.undeclare()).unwrap();
     test_context.close().await;
 }

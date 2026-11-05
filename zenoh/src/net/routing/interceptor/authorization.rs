@@ -96,7 +96,7 @@ impl std::fmt::Display for SubjectQuery {
             self.username.as_ref().map(|username| format!("{username}")),
             self.link_protocol.as_ref().map(|link| format!("{link}")),
             self.zid.as_ref().map(|zid| format!("{zid}")),
-            self.region_name.as_ref().map(|rn| rn.as_str().to_owned()),
+            self.region_name.as_ref().map(|rn| format!("{rn}")),
         ];
         write!(
             f,
@@ -649,5 +649,44 @@ impl PolicyEnforcer {
             }
             None => Ok(self.default_permission),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(name: Option<&str>) -> SubjectQuery {
+        SubjectQuery {
+            interface: None,
+            cert_common_name: None,
+            username: None,
+            link_protocol: None,
+            zid: None,
+            region_name: name.map(|n| n.parse().unwrap()),
+        }
+    }
+
+    fn subject(region_name: SubjectProperty<RegionName>) -> Subject {
+        Subject {
+            interface: SubjectProperty::Wildcard,
+            cert_common_name: SubjectProperty::Wildcard,
+            username: SubjectProperty::Wildcard,
+            link_type: SubjectProperty::Wildcard,
+            zid: SubjectProperty::Wildcard,
+            region_name,
+        }
+    }
+
+    #[test]
+    fn region_name_subjects() {
+        let backbone = subject(SubjectProperty::Exactly("backbone".parse().unwrap()));
+        assert!(backbone.matches(&query(Some("backbone"))));
+        assert!(!backbone.matches(&query(Some("client"))));
+        assert!(!backbone.matches(&query(None)));
+
+        let anyone = subject(SubjectProperty::Wildcard);
+        assert!(anyone.matches(&query(None)));
+        assert!(anyone.matches(&query(Some("client"))));
     }
 }
